@@ -1,0 +1,25 @@
+import time
+import asyncio
+import websocket
+
+
+async def _request_order_book_snapshot(self, trading_pair: str) -> Dict[str, Any]:
+        """
+        Retrieves a copy of the full order book from the exchange, for a particular trading pair.
+        :param trading_pair: the trading pair for which the order book will be retrieved
+        :return: the response from the exchange (JSON dictionary)
+        """
+        params = {
+            "symbol": await self._connector.exchange_symbol_associated_to_pair(trading_pair=trading_pair),
+            "limit": "1000"
+        }
+
+        rest_assistant = await self._api_factory.get_rest_assistant()
+        data = await rest_assistant.execute_request(
+            url='insert url'
+            params=params,
+            method=RESTMethod.GET,
+            throttler_limit_id=CONSTANTS.SNAPSHOT_PATH_URL,
+        )
+
+        return data

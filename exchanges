@@ -1,0 +1,11 @@
+class BinanceUS:
+
+    def __init__(self):
+        self._rest_url = ''
+        self._ws_url = ''
+
+    def get_rest_url(self):
+        return self._rest_url  
+    
+    def get_ws_url(self):
+        return self._ws_url  
