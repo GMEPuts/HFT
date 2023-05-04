@@ -3,6 +3,7 @@ class BinanceUS:
     def __init__(self):
         self._rest_url = ''
         self._ws_url = ''
+        self._name = 'BinanceUS'
 
     def get_rest_url(self):
         return self._rest_url  

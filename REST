@@ -200,7 +200,7 @@ class OrderBookData:
             auth=None
         )
         data = RA.execute_request(
-            url=self._exchange.get_rest_url(),
+            url=self._exchange._rest_url,
             throttler_limit_id='Need to implement',
             params=params1,
             method=RESTMethod.GET
