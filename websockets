@@ -1,25 +1,519 @@
-import time
-import asyncio
+import itertools
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
 import websocket
+import websockets
+import matplotlib.animation as animation
+import json
+import threading
+import numpy as np
+import polars as pl
+import MM_log as log
+import asyncio
+import requests
+from datetime import datetime
+import aiohttp
+from typing import Deque, Dict, List, Optional, Tuple
+import time
+from collections import defaultdict
 
 
-async def _request_order_book_snapshot(self, trading_pair: str) -> Dict[str, Any]:
-        """
-        Retrieves a copy of the full order book from the exchange, for a particular trading pair.
-        :param trading_pair: the trading pair for which the order book will be retrieved
-        :return: the response from the exchange (JSON dictionary)
-        """
-        params = {
-            "symbol": await self._connector.exchange_symbol_associated_to_pair(trading_pair=trading_pair),
-            "limit": "1000"
-        }
+def snapshot_message(symbol=None, last_update_id=None, bids=None, asks=None):
+    msg = {'symbol': symbol,
+           'lastUpdateId': last_update_id,
+           'bids': bids,
+           'asks': asks,
+           }
+    return msg
 
-        rest_assistant = await self._api_factory.get_rest_assistant()
-        data = await rest_assistant.execute_request(
-            url='insert url'
-            params=params,
-            method=RESTMethod.GET,
-            throttler_limit_id=CONSTANTS.SNAPSHOT_PATH_URL,
-        )
 
-        return data
+def orderbook_message(last_update_id=None, bids=None, asks=None):
+    msg = {'lastUpdateId': last_update_id,
+           'bids': bids,
+           'asks': asks,
+           }
+    return msg
+
+
+def orderbook_update(symbol=None, event_time=None,
+                     first_update_id=None, last_update_id=None, bids=None, asks=None):
+    msg = {'symbol': symbol,
+           'eventTime': event_time,
+           'firstUpdateId': first_update_id,
+           'lastUpdateId': last_update_id,
+           'bids': bids,
+           'asks': asks
+           }
+    return msg
+
+
+def apply_diffs(ob, update_msg):
+    """
+    Updates local order book's bid or ask lists based on the received update ([price, quantity])
+    """
+
+    order_book = {
+        'messageType': 'live_orderbook',
+        'message': {'lastUpdateId': update_msg['message']['lastUpdateId'],
+                    'bids': ob['message']['bids'],
+                    'asks': ob['message']['asks']
+                    },
+        'timestamp': time.time(),
+        'symbol': ob['symbol'].upper(),
+        'exchange': ob['exchange']
+    }
+    sides = ['bids', 'asks']
+
+    for side in sides:
+        for update in update_msg['message'][side]:
+            price, quantity = update
+            found = False
+            # price exists: remove or update local order
+            for i in range(0, len(order_book['message'][side])):
+
+                if price == order_book['message'][side][i][0]:
+                    # quantity is 0: remove
+                    if float(quantity) == 0:
+                        order_book['message'][side].pop(i)
+                        found = True
+                        break
+                    else:
+                        # quantity is not 0: update the order with new quantity
+                        order_book['message'][side][i] = update
+                        found = True
+                        break
+
+                # price not found: add new order
+            if not found and float(quantity) != 0:
+                order_book['message'][side].append(update)
+                if side == 'asks':
+                    order_book['message'][side] = sorted(order_book['message'][side])  # asks prices in ascendant order
+                else:
+                    order_book['message'][side] = sorted(order_book['message'][side],
+                                                         reverse=True)  # bids prices in descendant order
+                # maintain side depth <= 1000
+                if len(order_book['message'][side]) > 1000:
+                    order_book['message'][side].pop(len(order_book['message'][side]) - 1)
+
+    return order_book
+
+
+class ExchangeDataSource:
+
+    def __init__(self,
+                 symbols,
+                 name,
+                 ws_url,
+                 rest_url,
+                 rest_depth_endpoint,
+                 trade_payload,
+                 depth_payload,
+                 modify_snapshot_msg,
+                 ob_message,
+                 ob_update,
+                 channel_key_column,
+                 event_key_column,
+                 channel_keys,
+                 event_keys,
+                 snapshot_in_ws,
+                 modify_update_msg
+                 ):
+
+        self.trade_payload = trade_payload
+        self.depth_payload = depth_payload
+        self.snapshot_in_ws = snapshot_in_ws
+        self.channel_key_column = channel_key_column
+        self.event_key_column = event_key_column
+        self.channel_keys = channel_keys
+        self.modify_update_msg = modify_update_msg
+        self.modify_snapshot_msg = modify_snapshot_msg
+        self.event_keys = event_keys
+        self.ob_message = ob_message
+        self.ob_update = ob_update
+        self.ws_url = ws_url
+        self.rest_url = rest_url
+        self.rest_depth_endpoint = rest_depth_endpoint
+        self.symbols = symbols
+        self.depth_queue = asyncio.Queue()
+        self.trade_queue = asyncio.Queue()
+        self.name = name
+        self.connection = websockets.connect(uri=self.ws_url)
+        self._trade_messages_queue_key = "trade"
+        self._diff_messages_queue_key = "order_book_diff"
+        self._snapshot_messages_queue_key = "order_book_snapshot"
+        self._tracking_message_queues: Dict[str, asyncio.Queue] = {}
+        self._order_books_initialized = False
+        self._active_ws_stream = False
+        self._order_books: Dict[str, dict] = {}
+        self._order_book_diff_stream: asyncio.Queue = asyncio.Queue()
+        self._order_book_snapshot_stream: asyncio.Queue = asyncio.Queue()
+        self._order_book_trade_stream: asyncio.Queue = asyncio.Queue()
+        self.depth_params = []
+        self.trade_params = []
+        self.separator = '/'
+
+    def process_ob_msg(self, msg):
+        update_msg = self.modify_update_msg(msg)
+        return update_msg
+
+    def process_ob_snapshot(self, msg):
+        update_msg = self.modify_snapshot_msg(msg)
+        return update_msg
+
+    async def orderbook_snapshot(self, symbol):
+        async with aiohttp.ClientSession() as session:
+            async with session.get(self.rest_url + self.rest_depth_endpoint.format(symbol)) as resp:
+                snapshot = await resp.json()
+                snapshot_timestamp = time.time()
+                snapshot_msg = {
+                    'messageType': 'orderbook_snapshot',
+                    'message': self.process_ob_snapshot(snapshot),
+                    'systemTime': snapshot_timestamp,
+                    'symbol': symbol.upper(),
+                    'exchange': self.name
+                }
+
+        return snapshot_msg
+
+    async def subscribe_channels(self, trade=True, depth=True):
+
+        async with self.connection as ws:
+            if trade:
+                print('Trying to connect to trade data stream')
+                await ws.send(json.dumps(self.trade_payload))
+                print('Connected to trade data stream')
+            if depth:
+                print('Trying to connect to depth data stream')
+                await ws.send(json.dumps(self.depth_payload))
+                print('Connected to orderbook depth data stream')
+
+    async def init_order_books(self):
+
+        for symbol in self.symbols:
+            self._tracking_message_queues[symbol.upper()] = asyncio.Queue()
+
+            if self.snapshot_in_ws:
+                self._order_books[symbol.upper()] = {}
+                #print('none')
+            else:
+                self._order_books[symbol.upper()] = await self.orderbook_snapshot(symbol)
+        if not self.snapshot_in_ws:
+            self._order_books_initialized = True
+            print('orderbook initialized')
+
+    async def parse_trade_message(self):
+        trade_end = self.separator.join(self.trade_params)
+        try:
+            async with websockets.connect(uri=self.ws_url + '/stream?streams=' + trade_end) as ws:
+                async for msg in ws:
+                    if "result" not in msg:
+                        await self.trade_queue.put(json.loads(msg)['data'])
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            print('Unknown error, retrying in 5 seconds')
+            await asyncio.sleep(5.0)
+
+    async def parse_order_book_diff_message(self):
+
+        last_message_timestamp: float = time.time()
+        messages_queued: int = 0
+        messages_accepted: int = 0
+        messages_rejected: int = 0
+        
+        async with self.connection as ws:
+
+            print('Trying to connect to trade data stream')
+            await ws.send(json.dumps(self.trade_payload))
+            print('Connected to trade data stream')
+
+            print('Trying to connect to depth data stream')
+            await ws.send(json.dumps(self.depth_payload))
+            print('Connected to orderbook depth data stream')
+
+            while True:
+
+                try:
+                    msg = await ws.recv()
+                    msg = json.loads(msg)
+                    #print(msg)
+
+                    if msg[self.channel_key_column] == self.channel_keys['trade']:
+                        trade_msg = []
+
+                    # OB updates
+                    if msg[self.channel_key_column] == self.channel_keys['depth'] and self.snapshot_in_ws:
+                        if msg[self.event_key_column] == self.event_keys['snapshot']:
+                            snapshot_msg = self.process_ob_snapshot(msg)
+                            print(snapshot_msg)
+                            self._order_books[snapshot_msg['symbol'].upper()] = {
+                                'messageType': 'orderbook_snapshot',
+                                'message': snapshot_msg,
+                                'timestamp': time.time(),
+                                'symbol': snapshot_msg['symbol'].upper(),
+                                'exchange': self.name
+                            }
+                            self._order_books_initialized = True
+
+                    if msg[self.channel_key_column] == self.channel_keys['depth'] \
+                            and (msg[self.event_key_column] == self.event_keys['update'] or self.event_keys['update'] == 'None'):
+
+                        depth_msg = self.modify_update_msg(msg)
+                        #print(depth_msg)
+
+                        #if symbol not in self._tracking_message_queues:
+                            #print('not in msg queu')
+                            #continue
+                        message_queue = self._tracking_message_queues[depth_msg['symbol'].upper()]
+
+                        await message_queue.put({
+                            'messageType': 'orderbook_update',
+                            'message': depth_msg,
+                            'timestamp': time.time(),
+                            'symbol': depth_msg['symbol'].upper(),
+                            'exchange': self.name
+                        })
+
+                        messages_accepted += 1
+                        # Log some statistics.
+                        now: float = time.time()
+                        if int(now / 60.0) > int(last_message_timestamp / 60.0):
+                            print(f"Diff messages processed: {messages_accepted}, "
+                                  f"rejected: {messages_rejected}, queued: {messages_queued}")
+                            messages_accepted = 0
+                            messages_rejected = 0
+                            messages_queued = 0
+                        last_message_timestamp = now
+
+                except KeyError:
+                    continue
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    print('Unknown error, retrying in 5 seconds')
+                    await asyncio.sleep(5.0)
+                    break
+
+    async def track_orderbook(self, symbol):
+
+        message_queue = self._tracking_message_queues[symbol.upper()]
+        order_book = self._order_books[symbol.upper()]
+
+        last_message_timestamp: float = time.time()
+        diff_messages_accepted: int = 0
+        messages_rejected = 0
+        while True:
+
+            try:
+                update_msg = await message_queue.get()
+
+                # message handler - update snapshot
+                if update_msg['message']['lastUpdateId'] <= self._order_books[symbol.upper()]['message']['lastUpdateId']:
+                    print('Not an update')
+                    continue
+                if update_msg['message']['firstUpdateId'] <= self._order_books[symbol.upper()]['message']['lastUpdateId'] + 1 <= \
+                        update_msg['message']['lastUpdateId']:
+                    # print('message good')
+                    self._order_books[symbol.upper()] = apply_diffs(self._order_books[symbol.upper()], update_msg)
+                    #print(self._order_books[symbol.upper()])
+                else:
+                    if self.snapshot_in_ws:
+                        print(print('Out of sync, re-syncing...'))
+                    else:
+                        self._order_books[symbol.upper()] = await self.orderbook_snapshot(symbol=symbol.upper())
+                        print('Out of sync, re-syncing...')
+
+            except asyncio.queues.QueueEmpty:
+                # await asyncio.sleep(0)
+                continue
+
+    async def get_trades(self):
+        while True:
+            msg = await self.trade_queue.get()
+            print(msg)
+
+    async def track_BBA(self, symbol, refresh_rate=1):
+        while True:
+            if not self._order_books_initialized:
+                await asyncio.sleep(.1)
+                continue
+            else:
+                #print(self._order_books[symbol.upper()])
+                best_bid = float(self._order_books[symbol.upper()]['message']['bids'][0][0])
+                best_ask = float(self._order_books[symbol.upper()]['message']['asks'][0][0])
+                mid = (best_bid + best_ask) / 2
+                spread = (best_ask - best_bid) / best_bid
+                msg = {'messageType': 'BBA',
+                       'message': {'best bid': best_bid, 'best ask': best_ask, 'midprice': mid, 'Spread %': spread},
+                       'timestamp': time.time(),
+                       'symbol': symbol.upper(),
+                       'exchange': self.name
+                       }
+                print(msg)
+                await asyncio.sleep(refresh_rate)
+
+
+def init_binance_us():
+    def get_ob_update(msg):
+        update_msg = orderbook_update(msg.get('s'), msg.get('E'),
+                                      msg.get('U'), msg.get('u'),
+                                      msg.get('b'), msg.get('a'))
+        return update_msg
+
+    def get_ob_snapshot(msg):
+        snapshot_msg = snapshot_message(msg.get('s'), msg.get('lastUpdateId'),
+                                        msg.get('bids'), msg.get('asks'))
+        return snapshot_msg
+    exchange = ExchangeDataSource(ws_url='wss://stream.binance.us:9443/ws',
+                                  rest_url='https://api.binance.us/api/v3/',
+                                  rest_depth_endpoint=f'depth?symbol={{}}',
+                                  trade_payload={
+                                      "method": "SUBSCRIBE",
+                                      "params": [],
+                                      "id": 1
+                                  },
+                                  depth_payload={
+                                      "method": "SUBSCRIBE",
+                                      "params": [],
+                                      "id": 2
+                                  },
+                                  ob_message=['lastUpdateId', 'bids', 'asks'],
+                                  ob_update=['s', 'E', 'U', 'u', 'b', 'a'],
+                                  modify_snapshot_msg=get_ob_snapshot,
+                                  modify_update_msg=get_ob_update,
+
+                                  channel_key_column='e',
+                                  event_key_column='s',
+                                  channel_keys={'trade': 'trade',
+                                                'depth': 'depthUpdate'
+                                                },
+                                  event_keys={
+                                      'update': 'None',
+                                      'trades': 'None',
+                                      'snapshot': 'None'
+                                  },
+                                  # event type, event time, first update, last
+                                  # update, bids, asks
+                                  snapshot_in_ws=False,
+                                  symbols=['BTCUSD'],
+                                  name='BinanceUS')
+    trade_params = []
+    depth_params = []
+    for symbol in exchange.symbols:
+        trade_params.append(f"{symbol.lower()}@trade")
+        depth_params.append(f"{symbol.lower()}@depth@1000ms")
+    exchange.trade_payload['params'] = trade_params
+    exchange.depth_payload['params'] = depth_params
+    return exchange
+
+
+def init_poloniex():
+    def get_ob_update(msg):
+        update_msg = orderbook_update(msg.get('data')[0].get('symbol'), msg.get('data')[0].get('ts'),
+                                      msg.get('data')[0].get('lastId'), msg.get('data')[0].get('id'),
+                                      msg.get('data')[0].get('bids'), msg.get('data')[0].get('asks'))
+        return update_msg
+
+    def get_ob_snapshot(msg):
+        snapshot_msg = snapshot_message(msg.get('data')[0].get('symbol'),msg.get('data')[0].get('id'), msg.get('data')[0].get('bids'),
+                                         msg.get('data')[0].get('asks'))
+        return snapshot_msg
+
+    exchange = ExchangeDataSource(ws_url='wss://ws.poloniex.com/ws/public',
+                                  rest_url='https://api.poloniex.com/markets/',
+                                  rest_depth_endpoint=f'{{}}/orderBook?scale={{}}&limit={{}}',
+                                  depth_payload={
+                                      "event": "subscribe",
+                                      "channel": ['book_lv2'],
+                                      "symbols": []
+                                  },  # provides snapshots and depth updates
+                                  trade_payload={
+                                      "event": "subscribe",
+                                      "channel": ['trades'],
+                                      "symbols": []
+                                  },
+                                  ob_message=['symbol', 'id', 'bids', 'asks'],
+                                  ob_update=['symbol', 'ts', 'lastId', 'id', 'bids', 'asks'],
+                                  modify_update_msg=get_ob_update,
+                                  modify_snapshot_msg=get_ob_snapshot,
+
+
+                                  channel_key_column='channel',
+                                  event_key_column='action',
+                                  channel_keys={'trade': 'trades',
+                                                'depth': 'book_lv2'
+                                                },
+                                  event_keys={'update': 'update',
+                                              'trades': 'trades',
+                                              'snapshot': 'snapshot'
+                                              },
+                                  # event type, event time, first update, last
+                                  # update, bids, asks
+                                  snapshot_in_ws=True,
+                                  symbols=['btc_usdt', 'eth_usdt'],
+                                  name='Poloniex'
+                                  )
+    for symbol in exchange.symbols:
+        exchange.trade_payload['symbols'].append(symbol.lower())
+        exchange.depth_payload['symbols'].append(symbol.lower())
+    return exchange
+
+
+'''
+def init_kraken():
+    exchange = ExchangeDataSource(ws_url='wss://ws.kraken.com/',
+                                  rest_url='https://api.kraken.com/',
+                                  rest_depth_endpoint='',
+                                  depth_payload={
+                                      "event": "subscribe",
+                                      "pair": [],
+                                      "subscription": {
+                                          'depth': 100,
+                                          "name": "book"
+                                      }
+                                  },  # provides snapshots and depth updates
+                                  trade_payload={
+                                      "event": "subscribe",
+                                      "pair": [],
+                                      "subscription": {
+                                          "name": "trade"
+                                      }
+                                  },
+                                  ob_message=['id', 'bs', 'as'],
+                                  ob_update=['action', 'ts', 'lastId', 'id', 'b', 'a'],
+                                  # event type, event time, first update, last
+                                  # update, bids, asks
+                                  symbols=['XBT/USD', 'XBT/EUR'],
+                                  name='Kraken'
+                                  )
+    for symbol in exchange.symbols:
+        exchange.trade_payload['pair'].append(symbol)
+        exchange.depth_payload['pair'].append(symbol)
+    return exchange'''
+
+
+async def main():
+    binance_us = init_binance_us()
+    poloniex = init_poloniex()
+    # kraken = init_kraken()
+    # subscribe to depth and trade streams
+    # await binance_us.subscribe_channels(trade=False, depth=True)
+    # await binance_us.init_order_books()
+
+    await poloniex.init_order_books()
+    await binance_us.init_order_books()
+    # await asyncio.gather(binance_us.parse_order_book_diff_message(),
+    # binance_us.track_orderbook(binance_us.symbols[0]),
+    # binance_us.track_BBA(binance_us.symbols[0], refresh_rate=1)
+    # )
+    await asyncio.gather(poloniex.parse_order_book_diff_message(),
+                         binance_us.parse_order_book_diff_message(),
+                         poloniex.track_orderbook(poloniex.symbols[0]),
+                         binance_us.track_orderbook(binance_us.symbols[0]),
+                         poloniex.track_BBA(poloniex.symbols[0].upper()),
+                         binance_us.track_BBA(binance_us.symbols[0]))
+
+
+asyncio.run(main())
+
