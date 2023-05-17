@@ -15,6 +15,7 @@ import requests
 from datetime import datetime
 import aiohttp
 from typing import Deque, Dict, List, Optional, Tuple
+from exchanges import binance_us
 import time
 from collections import defaultdict
 
@@ -139,6 +140,7 @@ class ExchangeDataSource:
         self.trade_queue = asyncio.Queue()
         self.name = name
         self.connection = websockets.connect(uri=self.ws_url)
+        self.ws_active = False
         self._trade_messages_queue_key = "trade"
         self._diff_messages_queue_key = "order_book_diff"
         self._snapshot_messages_queue_key = "order_book_snapshot"
@@ -222,78 +224,81 @@ class ExchangeDataSource:
         messages_accepted: int = 0
         messages_rejected: int = 0
         
-        async with self.connection as ws:
+        while not self.ws_active:
+            self.ws_active = True
+            async with self.connection as ws:
 
-            print('Trying to connect to trade data stream')
-            await ws.send(json.dumps(self.trade_payload))
-            print('Connected to trade data stream')
+                print('Trying to connect to trade data stream')
+                await ws.send(json.dumps(self.trade_payload))
+                print('Connected to trade data stream')
 
-            print('Trying to connect to depth data stream')
-            await ws.send(json.dumps(self.depth_payload))
-            print('Connected to orderbook depth data stream')
+                print('Trying to connect to depth data stream')
+                await ws.send(json.dumps(self.depth_payload))
+                print('Connected to orderbook depth data stream')
 
-            while True:
+                while True:
 
-                try:
-                    msg = await ws.recv()
-                    msg = json.loads(msg)
-                    #print(msg)
+                    try:
+                        msg = await ws.recv()
+                        msg = json.loads(msg)
+                        #print(msg)
 
-                    if msg[self.channel_key_column] == self.channel_keys['trade']:
-                        trade_msg = []
+                        if msg[self.channel_key_column] == self.channel_keys['trade']:
+                            trade_msg = []
 
-                    # OB updates
-                    if msg[self.channel_key_column] == self.channel_keys['depth'] and self.snapshot_in_ws:
-                        if msg[self.event_key_column] == self.event_keys['snapshot']:
-                            snapshot_msg = self.process_ob_snapshot(msg)
-                            print(snapshot_msg)
-                            self._order_books[snapshot_msg['symbol'].upper()] = {
-                                'messageType': 'orderbook_snapshot',
-                                'message': snapshot_msg,
+                        # OB updates
+                        if msg[self.channel_key_column] == self.channel_keys['depth'] and self.snapshot_in_ws:
+                            if msg[self.event_key_column] == self.event_keys['snapshot']:
+                                snapshot_msg = self.process_ob_snapshot(msg)
+                                print(snapshot_msg)
+                                self._order_books[snapshot_msg['symbol'].upper()] = {
+                                    'messageType': 'orderbook_snapshot',
+                                    'message': snapshot_msg,
+                                    'timestamp': time.time(),
+                                    'symbol': snapshot_msg['symbol'].upper(),
+                                    'exchange': self.name
+                                }
+                                self._order_books_initialized = True
+
+                        if msg[self.channel_key_column] == self.channel_keys['depth'] \
+                                and (msg[self.event_key_column] == self.event_keys['update'] or self.event_keys['update'] == 'None'):
+
+                            depth_msg = self.modify_update_msg(msg)
+                            #print(depth_msg)
+
+                            #if symbol not in self._tracking_message_queues:
+                                #print('not in msg queu')
+                                #continue
+                            message_queue = self._tracking_message_queues[depth_msg['symbol'].upper()]
+
+                            await message_queue.put({
+                                'messageType': 'orderbook_update',
+                                'message': depth_msg,
                                 'timestamp': time.time(),
-                                'symbol': snapshot_msg['symbol'].upper(),
+                                'symbol': depth_msg['symbol'].upper(),
                                 'exchange': self.name
-                            }
-                            self._order_books_initialized = True
+                            })
 
-                    if msg[self.channel_key_column] == self.channel_keys['depth'] \
-                            and (msg[self.event_key_column] == self.event_keys['update'] or self.event_keys['update'] == 'None'):
+                            messages_accepted += 1
+                            # Log some statistics.
+                            now: float = time.time()
+                            if int(now / 60.0) > int(last_message_timestamp / 60.0):
+                                print(f"Diff messages processed: {messages_accepted}, "
+                                    f"rejected: {messages_rejected}, queued: {messages_queued}")
+                                messages_accepted = 0
+                                messages_rejected = 0
+                                messages_queued = 0
+                            last_message_timestamp = now
 
-                        depth_msg = self.modify_update_msg(msg)
-                        #print(depth_msg)
-
-                        #if symbol not in self._tracking_message_queues:
-                            #print('not in msg queu')
-                            #continue
-                        message_queue = self._tracking_message_queues[depth_msg['symbol'].upper()]
-
-                        await message_queue.put({
-                            'messageType': 'orderbook_update',
-                            'message': depth_msg,
-                            'timestamp': time.time(),
-                            'symbol': depth_msg['symbol'].upper(),
-                            'exchange': self.name
-                        })
-
-                        messages_accepted += 1
-                        # Log some statistics.
-                        now: float = time.time()
-                        if int(now / 60.0) > int(last_message_timestamp / 60.0):
-                            print(f"Diff messages processed: {messages_accepted}, "
-                                  f"rejected: {messages_rejected}, queued: {messages_queued}")
-                            messages_accepted = 0
-                            messages_rejected = 0
-                            messages_queued = 0
-                        last_message_timestamp = now
-
-                except KeyError:
-                    continue
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    print('Unknown error, retrying in 5 seconds')
-                    await asyncio.sleep(5.0)
-                    break
+                    except KeyError:
+                        continue
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        print('Unknown error, retrying in 5 seconds')
+                        await asyncio.sleep(5.0)
+                        self.ws_active = False
+                        break
 
     async def track_orderbook(self, symbol):
 
@@ -303,7 +308,7 @@ class ExchangeDataSource:
         last_message_timestamp: float = time.time()
         diff_messages_accepted: int = 0
         messages_rejected = 0
-        while True:
+        while self.ws_active:
 
             try:
                 update_msg = await message_queue.get()
@@ -334,7 +339,7 @@ class ExchangeDataSource:
             print(msg)
 
     async def track_BBA(self, symbol, refresh_rate=1):
-        while True:
+        while self.ws_active:
             if not self._order_books_initialized:
                 await asyncio.sleep(.1)
                 continue
@@ -352,7 +357,7 @@ class ExchangeDataSource:
                        }
                 print(msg)
                 await asyncio.sleep(refresh_rate)
-
+    
 
 def init_binance_us():
     def get_ob_update(msg):
