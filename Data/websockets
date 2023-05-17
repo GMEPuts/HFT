@@ -16,9 +16,7 @@ import aiohttp
 from typing import Deque, Dict, List, Optional, Tuple
 import time
 from collections import defaultdict
-import sys
-sys.path.append("./Data")
-import exchanges
+
 
 def snapshot_message(symbol=None, last_update_id=None, bids=None, asks=None):
     msg = {'symbol': symbol,
