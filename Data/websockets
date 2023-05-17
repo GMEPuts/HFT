@@ -9,16 +9,16 @@ import json
 import threading
 import numpy as np
 import polars as pl
-import MM_log as log
 import asyncio
 import requests
 from datetime import datetime
 import aiohttp
 from typing import Deque, Dict, List, Optional, Tuple
-from exchanges import binance_us
 import time
 from collections import defaultdict
-
+import sys
+sys.path.append("./Data")
+import exchanges
 
 def snapshot_message(symbol=None, last_update_id=None, bids=None, asks=None):
     msg = {'symbol': symbol,
@@ -443,7 +443,7 @@ def init_poloniex():
 
 
 async def main():
-    binance_us = init_binance_us()
+    binance_us = exchanges.init_binance_us()
     poloniex = init_poloniex()
     # kraken = init_kraken()
     # subscribe to depth and trade streams

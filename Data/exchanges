@@ -104,5 +104,3 @@ def init_poloniex():
         exchange.depth_payload['symbols'].append(symbol.lower())
     return exchange
 
-binance_us = init_binance_us()
-poloniex = init_poloniex()
