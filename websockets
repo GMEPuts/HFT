@@ -178,18 +178,7 @@ class ExchangeDataSource:
 
         return snapshot_msg
 
-    async def subscribe_channels(self, trade=True, depth=True):
-
-        async with self.connection as ws:
-            if trade:
-                print('Trying to connect to trade data stream')
-                await ws.send(json.dumps(self.trade_payload))
-                print('Connected to trade data stream')
-            if depth:
-                print('Trying to connect to depth data stream')
-                await ws.send(json.dumps(self.depth_payload))
-                print('Connected to orderbook depth data stream')
-
+   
     async def init_order_books(self):
 
         for symbol in self.symbols:
@@ -204,20 +193,7 @@ class ExchangeDataSource:
             self._order_books_initialized = True
             print('orderbook initialized')
 
-    async def parse_trade_message(self):
-        trade_end = self.separator.join(self.trade_params)
-        try:
-            async with websockets.connect(uri=self.ws_url + '/stream?streams=' + trade_end) as ws:
-                async for msg in ws:
-                    if "result" not in msg:
-                        await self.trade_queue.put(json.loads(msg)['data'])
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            print('Unknown error, retrying in 5 seconds')
-            await asyncio.sleep(5.0)
-
-    async def parse_order_book_diff_message(self):
+    async def parse_ws_messages(self):
 
         last_message_timestamp: float = time.time()
         messages_queued: int = 0
@@ -465,38 +441,6 @@ def init_poloniex():
     return exchange
 
 
-'''
-def init_kraken():
-    exchange = ExchangeDataSource(ws_url='wss://ws.kraken.com/',
-                                  rest_url='https://api.kraken.com/',
-                                  rest_depth_endpoint='',
-                                  depth_payload={
-                                      "event": "subscribe",
-                                      "pair": [],
-                                      "subscription": {
-                                          'depth': 100,
-                                          "name": "book"
-                                      }
-                                  },  # provides snapshots and depth updates
-                                  trade_payload={
-                                      "event": "subscribe",
-                                      "pair": [],
-                                      "subscription": {
-                                          "name": "trade"
-                                      }
-                                  },
-                                  ob_message=['id', 'bs', 'as'],
-                                  ob_update=['action', 'ts', 'lastId', 'id', 'b', 'a'],
-                                  # event type, event time, first update, last
-                                  # update, bids, asks
-                                  symbols=['XBT/USD', 'XBT/EUR'],
-                                  name='Kraken'
-                                  )
-    for symbol in exchange.symbols:
-        exchange.trade_payload['pair'].append(symbol)
-        exchange.depth_payload['pair'].append(symbol)
-    return exchange'''
-
 
 async def main():
     binance_us = init_binance_us()
@@ -512,8 +456,8 @@ async def main():
     # binance_us.track_orderbook(binance_us.symbols[0]),
     # binance_us.track_BBA(binance_us.symbols[0], refresh_rate=1)
     # )
-    await asyncio.gather(poloniex.parse_order_book_diff_message(),
-                         binance_us.parse_order_book_diff_message(),
+    await asyncio.gather(poloniex.parse_ws_messages(),
+                         binance_us.parse_ws_messages(),
                          poloniex.track_orderbook(poloniex.symbols[0]),
                          binance_us.track_orderbook(binance_us.symbols[0]),
                          poloniex.track_BBA(poloniex.symbols[0].upper()),
