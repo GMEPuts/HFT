@@ -1,1 +1,17 @@
 README
+Cryptocurrency High Frequency Trading Infrastructure in Python with high performance modules in C++
+
+Designed for Market Making and Cross Exchange arbitrage
+
+Designed to be compatible with all crypto centralized exchanges, will 
+
+Completed
+ - Rest API and Websocket market data handling
+ - Exchange module for connecting various crypto exchanges
+ - Error handling
+ 
+ In Progress
+  - User Data Websocket and Rest API streaming
+  - Risk / Inventory management module
+  - Order Handling module
+  - Strategy Modules
