@@ -88,6 +88,7 @@ class ExchangeDataSource:
         self.open_positions = []
         self.depth_params = []
         self.trade_params = []
+        self.symbols_active = {}
         self.separator = '/'
 
     def process_ob_msg(self, msg):
@@ -113,23 +114,15 @@ class ExchangeDataSource:
 
         return snapshot_msg
 
-    async def init_order_books(self, ob_queue: asyncio.Queue):
-
-        for symbol in self.symbols:
-            if self.snapshot_in_ws:
-                continue
-            else:
-                snapshot = await self.orderbook_snapshot(symbol)
-                await ob_queue.put(snapshot)
-
-        print('orderbook initialized')
-
     async def marketdata_ws(self, ob_queue: asyncio.Queue):
 
         last_message_timestamp: float = time.time()
         messages_queued: int = 0
         messages_accepted: int = 0
         messages_rejected: int = 0
+
+        for symbol in self.symbols:
+            self.symbols_active[symbol] = False
 
         while not self.ws_active:
             self.ws_active = True
@@ -161,65 +154,55 @@ class ExchangeDataSource:
                                     'symbol': snapshot_msg['symbol'].upper(),
                                     'exchange': self.name
                                 })
+                                self.symbols_active[snapshot_msg['symbol'].upper()] = True
 
                         if msg[self.channel_key_column] == self.channel_keys['depth'] \
                                 and (msg[self.event_key_column] == self.event_keys['update']
                                      or self.event_keys['update'] == 'None'):
 
                             depth_msg = self.modify_update_msg(msg)
-                            await ob_queue.put({
-                                'messageType': 'orderbook_update',
-                                'message': depth_msg,
-                                'timestamp': time.time(),
-                                'symbol': depth_msg['symbol'].upper(),
-                                'exchange': self.name
-                            })
 
-                            messages_accepted += 1
-                            # Log some statistics.
-                            now: float = time.time()
+                            # if no snapshot yet, use snapshot first
+                            if not self.symbols_active[depth_msg['symbol'].upper()]:
+                                snapshot_msg = await self.orderbook_snapshot(depth_msg['symbol'].upper())
+                                await ob_queue.put(snapshot_msg)
+                                self.symbols_active[depth_msg['symbol'].upper()] = True
+                                continue
 
-                            if now - last_ping > 20 and self.ping_msg is not None:
-                                await ws.send(json.dumps(self.ping_msg))
-                                last_ping = time.time()
+                            if self.symbols_active[depth_msg['symbol'].upper()]:
+                                await ob_queue.put({
+                                    'messageType': 'orderbook_update',
+                                    'message': depth_msg,
+                                    'timestamp': time.time(),
+                                    'symbol': depth_msg['symbol'].upper(),
+                                    'exchange': self.name
+                                })
 
-                            if int(now / 60.0) > int(last_message_timestamp / 60.0):
-                                print(f"Diff messages processed: {messages_accepted}, "
-                                      f"rejected: {messages_rejected}, queued: {messages_queued}")
-                                messages_accepted = 0
-                                messages_rejected = 0
-                                messages_queued = 0
-                            last_message_timestamp = now
+                                messages_accepted += 1
+                                # Log some statistics.
+                                now: float = time.time()
+
+                                if now - last_ping > 20 and self.ping_msg is not None:
+                                    await ws.send(json.dumps(self.ping_msg))
+                                    last_ping = time.time()
+
+                                if int(now / 60.0) > int(last_message_timestamp / 60.0):
+                                    print(f"Diff messages processed: {messages_accepted}, "
+                                          f"rejected: {messages_rejected}, queued: {messages_queued}")
+                                    messages_accepted = 0
+                                    messages_rejected = 0
+                                    messages_queued = 0
+                                last_message_timestamp = now
 
                     except KeyError:
                         continue
-                    #except asyncio.CancelledError:
-                        #print(f'{self.name} Cancelled error')
+                    # except asyncio.CancelledError:
+                    # print(f'{self.name} Cancelled error')
                     except Exception as e:
                         print(f'|{self.name}| Error: {e}, retrying in 1 second')
                         await asyncio.sleep(1)
                         self.ws_active = False
                         break
-
-    async def track_BBA(self, symbol, refresh_rate=1):
-        while self.ws_active:
-            if not self._order_books_initialized:
-                await asyncio.sleep(.1)
-                continue
-            else:
-                # print(self._order_books[symbol.upper()])
-                best_bid = float(self._order_books[symbol.upper()]['message']['bids'][0][0])
-                best_ask = float(self._order_books[symbol.upper()]['message']['asks'][0][0])
-                mid = (best_bid + best_ask) / 2
-                spread = (best_ask - best_bid) / best_bid
-                msg = {'messageType': 'BBA',
-                       'message': {'best bid': best_bid, 'best ask': best_ask, 'midprice': mid, 'Spread %': spread},
-                       'timestamp': time.time(),
-                       'symbol': symbol.upper(),
-                       'exchange': self.name
-                       }
-                print(msg)
-                await asyncio.sleep(refresh_rate)
 
     async def userdata_snapshot(self, balance_queue: asyncio.Queue):
         params, headers = self.user_snapshot_params(time.time(), self.api_key, self.api_secret)
@@ -235,7 +218,8 @@ class ExchangeDataSource:
                     b = [x.get('asset'), float(x.get('free')), float(x.get('locked'))]
                     balances.append(b)
 
-                snapshot_msg = {'eventTime': account_snapshot['updateTime'],
+                snapshot_msg = {'msgType': 'snapshot',
+                                'eventTime': time.time(),
                                 'balances': balances
                                 }
                 await balance_queue.put(snapshot_msg)
@@ -250,7 +234,11 @@ class ExchangeDataSource:
 
                 if msg['e'] == "outboundAccountPosition":
                     account_msg = self.account_update_msg(msg)
-                    await balance_queue.put(account_msg)
+                    account_msg2 = {'msgType': 'update',
+                                    'eventTime': time.time(),
+                                    'balances': account_msg['balances']
+                                    }
+                    await balance_queue.put(account_msg2)
 
                 if msg['e'] == "executionReport":
                     order_msg = self.order_update_msg(msg)

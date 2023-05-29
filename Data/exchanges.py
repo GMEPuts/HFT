@@ -29,8 +29,9 @@ def binance_us(symbols):
         return snapshot_msg
 
     def get_order_update(msg):
-        order_msg = order_update_msg('BinanceUS',msg.get('s'), msg.get('E'), msg.get('S'), msg.get('q'), msg.get('p'), msg.get('c'),
-                                     msg.get('T'), msg.get('x'), msg.get('o'), msg.get('f'), msg.get('C'), msg.get('r'))
+        order_msg = order_update_msg('BinanceUS', msg.get('s'), msg.get('E'), msg.get('S'), msg.get('q'), msg.get('p'),
+                                     msg.get('z'), msg.get('Z'), msg.get('c'), msg.get('T'), msg.get('x'), msg.get('o'),
+                                     msg.get('f'), msg.get('C'), msg.get('r'))
         return order_msg
 
     def get_account_update(msg):

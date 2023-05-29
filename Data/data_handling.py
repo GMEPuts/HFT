@@ -60,34 +60,35 @@ def apply_diffs(ob, update_msg):
 
 
 def apply_balance_updates(snapshot, update_msg):
-    snapshot = snapshot[update_msg['exchange']]
-    update_bals = update_msg['balances']
-    snapshot_bals = snapshot['balances']
+    #snapshot = snapshot[update_msg['exchange']]
+    if update_msg['msgType'] == 'snapshot':
+        return update_msg
 
-    for x in update_bals:
-        #      asset       free balance       locked balance
-        b = [x.get('a'), float(x.get('f')), float(x.get('l'))]
-        for i, bal in enumerate(snapshot_bals):
-            # match found -> remove old balance -> add new balance
-            if bal[0] == b[0]:
-                snapshot_bals.pop(i)
-                snapshot_bals.append(b)
-            else:
-                continue
-    msg = {'exchange': update_msg['exchange'],
-           'eventTime': update_msg['eventTime'],
-           'balances': snapshot_bals
-           }
-    return msg
+    else:
+        update_bals = update_msg['balances']
+        snapshot_bals = snapshot['balances']
+        for x in update_bals:
+            #      asset       free balance       locked balance
+            b = [x.get('a'), float(x.get('f')), float(x.get('l'))]
+            for i, bal in enumerate(snapshot_bals):
+                # match found -> remove old balance -> add new balance
+                if bal[0] == b[0]:
+                    snapshot_bals.pop(i)
+                    snapshot_bals.append(b)
+                else:
+                    continue
+        msg = {
+            'eventTime': update_msg['eventTime'],
+            'balances': snapshot_bals
+        }
+        return msg
 
 
 def order_message_handler(open_orders, open_positions, msg):
     symbol = msg['symbol']
-    side = msg['side']
+
     exchange = msg['exchange']
 
-    quantity = float(msg['quantity'])
-    price = float(msg['price'])
     orderId = msg['clientOrderID']
     ts = msg['eventTime']
 
@@ -110,15 +111,9 @@ def order_message_handler(open_orders, open_positions, msg):
                 if order['clientOrderID'] == msg['origClientOrderID']:
                     open_orders.pop(i)
                     open_positions.append(position_msg(msg, exchange.name))
-                    print(f'| TRADE EXECUTED | {exchange} | {symbol} | {side} | LIMIT_ORDER |'
-                          f' quantity: {quantity} | price: {price} |'
-                          f' fees: {quantity * price} |')
 
         if msg['orderType'] == 'MARKET':
             open_positions.append(position_msg(msg, exchange))
-            print(f'| TRADE EXECUTED | {exchange} | {symbol} | {side} | MARKET_ORDER |'
-                  f' quantity: {quantity} | price: {price} |'
-                  f' fees: {quantity * price} |')
 
     # order rejected - log rejection message
     if msg['executionType'] == 'REJECTED':
@@ -136,18 +131,28 @@ def order_message_handler(open_orders, open_positions, msg):
 
 
 async def orderbook_update_handler(exchange, symbol, orderbook, update_msg):
+    outofsync_count = 0
     # message handler - update snapshot
     if update_msg['message']['lastUpdateId'] <= orderbook['message']['lastUpdateId']:
-        print(f'{exchange.name} Not an update')
+        print(f'{exchange.name}|{symbol} Not an update')
+
     if update_msg['message']['firstUpdateId'] <= orderbook['message'][
         'lastUpdateId'] + 1 <= \
             update_msg['message']['lastUpdateId']:
-        # print('message good')
         orderbook = apply_diffs(orderbook, update_msg)
+
     else:
+
         if exchange.snapshot_in_ws:
-            print(print(f'{exchange.name} Out of sync, re-syncing...'))
+            print(print(f'{exchange.name}|{symbol} Out of sync, re-syncing...'))
         else:
-            orderbook = await exchange.orderbook_snapshot(symbol=symbol.upper())
-            print(f'{exchange.name} Out of sync, re-syncing...')
+            outofsync_count += 1
+            if outofsync_count % 5 == 0:
+                orderbook = await exchange.orderbook_snapshot(symbol=symbol.upper())
+                print(f'{exchange.name}|{symbol} Out of sync, re-syncing...')
+
     return orderbook
+
+
+def equity_curve(freq, trades):
+    now = time.time()

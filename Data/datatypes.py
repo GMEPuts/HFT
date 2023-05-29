@@ -28,13 +28,15 @@ def orderbook_update(symbol=None, event_time=None,
 
 
 def account_update_msg(eventTime=None, balances=None):
-    msg = {'eventTime': eventTime,
+    msg = {
+           'eventTime': eventTime,
            'balances': balances
            }
     return msg
 
 
-def order_update_msg(exchange=None, symbol=None, eventTime=None, side=None, quantity=None, price=None, clientOrderID=None,
+def order_update_msg(exchange=None, symbol=None, eventTime=None, side=None, quantity=None, price=None,
+                     cu_fill_quant=None,cu_quote_quant=None,clientOrderID=None,
                      transactTime=None, executionType=None, orderType=None, tif=None,
                      origClientOrderID=None, rejectReason=None):
     msg = {'exchange': exchange,
@@ -43,8 +45,10 @@ def order_update_msg(exchange=None, symbol=None, eventTime=None, side=None, quan
            'executionType': executionType,
            'orderType': orderType,
            'side': side,
-           'quantity': quantity,
-           'price': price,
+           'order_quantity': quantity,
+           'order_price': price,
+           'fill_quantity': cu_fill_quant,
+           'fill_quote_quant': cu_quote_quant,
            'clientOrderID': clientOrderID,
            'transactTime': transactTime,
            'tif': tif,
@@ -67,8 +71,8 @@ def position_msg(msg, exchange):
     message = {'exchange': exchange,
                'symbol': msg['symbol'],
                'side': msg['side'],
-               'quantity': msg['quantity'],
-               'price': msg['price'],
+               'fill_quantity': float(msg['fill_quantity']),
+               'avg_fill_price': float(msg['fill_quote_quant'])/float(msg['fill_quantity']),
                'transactTime': msg['transactTime']
                }
     return message
