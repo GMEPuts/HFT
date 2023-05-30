@@ -114,15 +114,15 @@ class ExchangeDataSource:
 
         return snapshot_msg
     
-    async def connect_websocket(self,ws,url,on_message,payload=None):
+    async def connect_websocket(self,ws,url,on_message,queue,payload=None):
         async with aiohttp.ClientSession() as session:
             ws = await session.ws_connect(url)
             if payload is not None:
                 ws.send_str(payload)
-            await on_message()
+            await on_message(ws,queue)
             
-    async def on_depth_message(self,ob_queue):
-        async for msg in self.websocket:
+    async def on_depth_message(self,ws,queue):
+        async for msg in ws:
             if msg.type == aiohttp.WSMsgType.text:
 
                 msg = msg.json()
@@ -130,7 +130,7 @@ class ExchangeDataSource:
                         if msg[self.channel_key_column] == self.channel_keys['depth'] and self.snapshot_in_ws:
                             if msg[self.event_key_column] == self.event_keys['snapshot']:
                                 snapshot_msg = self.process_ob_snapshot(msg)
-                                await ob_queue.put({
+                                await queue.put({
                                     'messageType': 'orderbook_snapshot',
                                     'message': snapshot_msg,
                                     'timestamp': time.time(),
@@ -148,12 +148,12 @@ class ExchangeDataSource:
                             # if no snapshot yet, use snapshot first
                             if not self.symbols_active[depth_msg['symbol'].upper()]:
                                 snapshot_msg = await self.orderbook_snapshot(depth_msg['symbol'].upper())
-                                await ob_queue.put(snapshot_msg)
+                                await queue.put(snapshot_msg)
                                 self.symbols_active[depth_msg['symbol'].upper()] = True
                                 continue
 
                             if self.symbols_active[depth_msg['symbol'].upper()]:
-                                await ob_queue.put({
+                                await queue.put({
                                     'messageType': 'orderbook_update',
                                     'message': depth_msg,
                                     'timestamp': time.time(),
@@ -181,19 +181,20 @@ class ExchangeDataSource:
             elif msg.type == aiohttp.WSMsgType.closed:
                 self.depth_ws_active = False
                 break
-    async def on_depth_message(self,trade_queue):
-        async for msg in self.websocket:
+                
+    async def on_trade_message(self,ws,queue):
+        async for msg in ws:
             if msg.type == aiohttp.WSMsgType.text:
 
                 msg = msg.json()
                 if msg[self.channel_key_column] == self.channel_keys['trade']:
                     trade_msg = msg
-                    await trade_queue.put(trade_msg)
+                    await queue.put(trade_msg)
             elif msg.type == aiohttp.WSMsgType.closed:
-                self.depth_ws_active = False
+                self.trade_ws_active = False
                 break
            
-    async def marketdata_ws(self, ob_queue: asyncio.Queue):
+    async def marketdata_ws(self, queue: asyncio.Queue):
     
         last_message_timestamp: float = time.time()
         messages_queued: int = 0
@@ -226,7 +227,7 @@ class ExchangeDataSource:
                         if msg[self.channel_key_column] == self.channel_keys['depth'] and self.snapshot_in_ws:
                             if msg[self.event_key_column] == self.event_keys['snapshot']:
                                 snapshot_msg = self.process_ob_snapshot(msg)
-                                await ob_queue.put({
+                                await queue.put({
                                     'messageType': 'orderbook_snapshot',
                                     'message': snapshot_msg,
                                     'timestamp': time.time(),
@@ -244,12 +245,12 @@ class ExchangeDataSource:
                             # if no snapshot yet, use snapshot first
                             if not self.symbols_active[depth_msg['symbol'].upper()]:
                                 snapshot_msg = await self.orderbook_snapshot(depth_msg['symbol'].upper())
-                                await ob_queue.put(snapshot_msg)
+                                await queue.put(snapshot_msg)
                                 self.symbols_active[depth_msg['symbol'].upper()] = True
                                 continue
 
                             if self.symbols_active[depth_msg['symbol'].upper()]:
-                                await ob_queue.put({
+                                await queue.put({
                                     'messageType': 'orderbook_update',
                                     'message': depth_msg,
                                     'timestamp': time.time(),
