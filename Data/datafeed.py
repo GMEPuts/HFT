@@ -26,6 +26,7 @@ class MasterDatafeed:
         self.orderbook_update_queue = asyncio.Queue()
         self.order_message_queue = asyncio.Queue()
         self.balance_message_queue = asyncio.Queue()
+        self.trade_message_queue = asyncio.Queue()
         self.ob_stream_active = False
         self.userdata_stream_active = False
         self.equity_tracking = False
@@ -187,9 +188,23 @@ class MasterDatafeed:
         asyncio.ensure_future(self.get_open_orders())
         async with asyncio.TaskGroup() as tg:
             for exchange in self.exchange_list:
-                tg.create_task(exchange.marketdata_ws(ob_queue=self.orderbook_update_queue))
+                #tg.create_task(exchange.marketdata_ws(ob_queue=self.orderbook_update_queue))
                 tg.create_task(exchange.userdata_ws(order_queue=self.order_message_queue,
                                                     balance_queue=self.balance_message_queue))
+                
+                tg.create_task(exchange.connect_websocket(ws=exchange.depth_ws,
+                                                         url=exchange.url+exchange.restDepth_endpoint,
+                                                         on_message=exchange.on_depth_message,
+                                                         queue=self.orderbook_update_queue,
+                                                         payload=json.dumps(exchange.depth_payload))
+                               
+                 tg.create_task(exchange.connect_websocket(ws=exchange.trade_ws,
+                                                         url=exchange.url+exchange.trade_endpoint,
+                                                         on_message=exchange.on_trade_message,
+                                                         queue=self.trade_message_queue,
+                                                         payload=json.dumps(exchange.trade_payload))
+                
+                
                 tg.create_task(self.get_orderbooks(exchange))
                 tg.create_task(self.get_balance(exchange))
                 tg.create_task(self.track_bba(.1, exchange, 'BTCUSD', 1000))
