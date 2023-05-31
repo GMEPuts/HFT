@@ -5,13 +5,18 @@ Designed for Market Making and Cross Exchange arbitrage
 
 Designed to be compatible with all crypto centralized exchanges
 
-Completed
+ Completed
  - Rest API and Websocket market data handling
  - Exchange module for connecting various crypto exchanges
- - Error handling
+ - User Data Websocket and Rest API streaming
+ - Order, position tracking
+ - Master module
  
- In Progress
-  - User Data Websocket and Rest API streaming
-  - Risk / Inventory management module
+ 
+  In Progress
+  - Error handling
   - Order Handling module
+
+  To Do
+  - Risk / Inventory management module
   - Strategy Modules
