@@ -1,5 +1,5 @@
 README
-Cryptocurrency High Frequency Trading Infrastructure in Python with high performance modules in C++
+Cryptocurrency High Frequency Trading Infrastructure in Python with high performance modules in Rust
 
 Designed for Market Making and Cross Exchange arbitrage
 
@@ -20,3 +20,4 @@ Designed to be compatible with all crypto centralized exchanges
   To Do
   - Risk / Inventory management module
   - Strategy Modules
+  - High Performance Modules in Rust
