@@ -1,0 +1,38 @@
+CMT Quanto
+
+SUMMARY
+-------
+CMT Quanto is a live trading system built in Python. The system has modules for: data handling,
+creating exchange connections, processing and storing data locally, and implementing / deploying the strategy.
+The system connects to Binance and Bitmex and requests best bid / ask data at 1 min intervals via REST API. 
+We use CCXT for placing orders and for private accoount data such as positions, balances, and trades.
+Data is stored in memory via a sql alchemy database, logging is done with the logging library in Python.
+
+USAGE
+-----
+Instructions for deploying the strategy
+
+1. Retreive API Keys / Secrets for each exchange.
+   Enter host / port, and other params for retreiving keys and secrets for both Bitmex and Binance in main.py
+   
+   Example:
+   
+2. Select pairs for trading.
+   Each quanto contract is given its own pair (dict) in main.py, which contains symbol names needed for: 
+   [Bitmex COINUSDT Quanto, Bitmex COINUSDT Spot, Bitmex BTCUSDT Spot, Binance COINUSDT PERP, Binance BTCUSDT PERP] for both the exchange API and a separate set for the symbols used by the CCXT clients.
+   Can also set leverage for the pair (which will apply to all assets traded). 
+   
+   Example:
+   
+3. Ensure strategy parameters are correct.
+   Specify parameters in strategy instance, in main.py. 
+   Select pairs initialized in step 2, specify whether to trade on testnet or live.
+   
+   Example:
+   
+4. Access data from sql database. (Optional)
+   Access tables in sql db if desired, can find a list of tables below.
+   
+   Example: Retreive net asset value from db every 30 min and plot equity curve.
+   
+   
